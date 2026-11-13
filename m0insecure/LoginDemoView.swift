@@ -12,6 +12,21 @@ struct LoginDemoView: View {
     @FocusState private var emailFieldFocused: Bool
     @State private var walletActivity: Activity<WalletAuthActivityAttributes>?
 
+    // MARK: - Rate Limiting & Backoff State
+    // 5 attempts initially, then 3 attempts on subsequent rounds before lockout
+    @State private var failedAttemptsInRound: Int = 0
+    @State private var lockoutCount: Int = 0
+    @State private var remainingLockout: Int = 0
+    @State private var lockoutTimer: Timer?
+
+    private var attemptsAllowedForCurrentRound: Int {
+        lockoutCount == 0 ? 5 : 3
+    }
+
+    private var isLockedOut: Bool {
+        remainingLockout > 0
+    }
+
     var body: some View {
         Form {
             Section(header: Text("Login")) {
@@ -53,22 +68,67 @@ struct LoginDemoView: View {
                 }
             }
 
-            Button("Login") {
-                login()
-            }
-
-            if let error = errorMessage {
+            // MARK: - Error Message (Simple, native styling matching success message)
+            if let error = errorMessage, !isLockedOut {
                 Section {
-                    Text(error)
-                        .foregroundColor(.red)
+                    HStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.red)
+                        Text(error)
+                            .font(.subheadline)
+                            .foregroundColor(.red)
+                    }
+                    .padding(.vertical, 4)
+                    .listRowBackground(Color.red.opacity(0.1))
                 }
             }
 
+            // MARK: - Rate Limit Lockout (Simple, native styling matching success message)
+            if isLockedOut {
+                Section {
+                    HStack(spacing: 10) {
+                        Image(systemName: "clock.fill")
+                            .foregroundColor(.orange)
+                        Text("Too many failed attempts. Retry in \(remainingLockout)s")
+                            .font(.subheadline)
+                            .foregroundColor(.orange)
+                    }
+                    .padding(.vertical, 4)
+                    .listRowBackground(Color.orange.opacity(0.1))
+                }
+            }
+
+            // MARK: - Success Message (Simple, native styling)
             if let success = successMessage {
                 Section {
-                    Text(success)
-                        .foregroundColor(.green)
+                    HStack(spacing: 10) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                        Text(success)
+                            .font(.subheadline)
+                            .foregroundColor(.green)
+                    }
+                    .padding(.vertical, 4)
+                    .listRowBackground(Color.green.opacity(0.1))
                 }
+            }
+
+            // MARK: - Login Action Button
+            Section {
+                Button(action: login) {
+                    HStack {
+                        Spacer()
+                        if isLockedOut {
+                            Label("Locked (\(remainingLockout)s)", systemImage: "lock.fill")
+                                .bold()
+                        } else {
+                            Text("Login")
+                                .bold()
+                        }
+                        Spacer()
+                    }
+                }
+                .disabled(isLockedOut || email.isEmpty || password.isEmpty)
             }
 
             Section {
@@ -81,20 +141,96 @@ struct LoginDemoView: View {
             }
         }
         .navigationTitle("Login Demo")
+        .onDisappear {
+            lockoutTimer?.invalidate()
+            lockoutTimer = nil
+        }
     }
 
     private func login() {
-        // Demo credentials only. Keep the response identical for either credential failure.
-        let realEmail = "user@example.com"
-        let realPassword = "Password123"
+        guard !isLockedOut else { return }
 
-        guard email == realEmail && password == realPassword else {
-            errorMessage = "Wrong credentials"
+        // 1️⃣ Input Validation against XSS, SQLi, and Command Injections
+        do {
+            try InputSanitizer.shared.validateSafety(input: email, fieldName: "Email")
+            try InputSanitizer.shared.validateSafety(input: password, fieldName: "Password")
+        } catch let violation as InjectionViolation {
+            recordFailedAttempt()
+            if !isLockedOut {
+                errorMessage = violation.localizedDescription
+            }
+            successMessage = nil
+            return
+        } catch {
+            recordFailedAttempt()
+            if !isLockedOut {
+                errorMessage = "Wrong credentials"
+            }
             successMessage = nil
             return
         }
+
+        // 2️⃣ Input Sanitization
+        let sanitizedEmail = InputSanitizer.shared.sanitizeEmail(email)
+
+        // 3️⃣ Verify Credentials (Demo credentials)
+        let realEmail = "user@example.com"
+        let realPassword = "Password123"
+
+        guard sanitizedEmail == realEmail && password == realPassword else {
+            recordFailedAttempt()
+            successMessage = nil
+            return
+        }
+
+        // Reset rate limiting on successful login
+        resetRateLimit()
         errorMessage = nil
         successMessage = "You successfully logged in"
+    }
+
+    // MARK: - Exponential Backoff Rate Limiting (5 attempts then 3 attempts each round)
+
+    private func recordFailedAttempt() {
+        failedAttemptsInRound += 1
+
+        if failedAttemptsInRound >= attemptsAllowedForCurrentRound {
+            // Lockout triggered
+            lockoutCount += 1
+            failedAttemptsInRound = 0
+            errorMessage = nil
+
+            // Exponential backoff: 5s, 10s, 20s, 40s, 80s, max 120s
+            let backoffSeconds = min(5 * Int(pow(2.0, Double(lockoutCount - 1))), 120)
+            startLockout(duration: backoffSeconds)
+        } else {
+            let attemptsLeft = attemptsAllowedForCurrentRound - failedAttemptsInRound
+            errorMessage = "Wrong credentials (\(attemptsLeft) attempts left)"
+        }
+    }
+
+    private func startLockout(duration: Int) {
+        lockoutTimer?.invalidate()
+        remainingLockout = duration
+        lockoutTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { timer in
+            DispatchQueue.main.async {
+                if remainingLockout > 1 {
+                    remainingLockout -= 1
+                } else {
+                    remainingLockout = 0
+                    timer.invalidate()
+                    lockoutTimer = nil
+                }
+            }
+        }
+    }
+
+    private func resetRateLimit() {
+        failedAttemptsInRound = 0
+        lockoutCount = 0
+        remainingLockout = 0
+        lockoutTimer?.invalidate()
+        lockoutTimer = nil
     }
 
     private func authenticateAndFillFromWallet() {
@@ -210,6 +346,7 @@ private struct RecoveryVerificationView: View {
     @State private var challengeVerified = false
     @State private var codeRequested = false
     @State private var message: String?
+    @State private var isErrorMessage = false
 
     private var selectedExactlyMatchesTargets: Bool {
         selectedTiles == challenge.targetIndices
@@ -249,6 +386,7 @@ private struct RecoveryVerificationView: View {
                     challengeVerified = false
                     codeRequested = false
                     message = nil
+                    isErrorMessage = false
                 }
                 Label(
                     challengeVerified ? "Verification complete" : "Select every matching image",
@@ -276,10 +414,16 @@ private struct RecoveryVerificationView: View {
                 Text("For privacy, the app should not reveal whether an account matches these details.")
             }
 
-            if codeRequested, let message {
+            if let message {
                 Section {
-                    Text(message)
-                        .foregroundStyle(.green)
+                    HStack(spacing: 8) {
+                        Image(systemName: isErrorMessage ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                            .foregroundColor(isErrorMessage ? .red : .green)
+                        Text(message)
+                            .font(.footnote)
+                            .foregroundColor(isErrorMessage ? .red : .green)
+                    }
+                    .listRowBackground(isErrorMessage ? Color.red.opacity(0.1) : Color.green.opacity(0.1))
                 }
             }
 
@@ -294,12 +438,27 @@ private struct RecoveryVerificationView: View {
     }
 
     private func requestCode() {
-        // Simulate delivery for this demo; no real SMS or email is sent.
+        // Validate against injections
+        do {
+            try InputSanitizer.shared.validateSafety(input: contact, fieldName: kind.contactLabel)
+        } catch let violation as InjectionViolation {
+            isErrorMessage = true
+            codeRequested = true
+            message = violation.localizedDescription
+            return
+        } catch {
+            isErrorMessage = true
+            codeRequested = true
+            message = "Dangerous input detected."
+            return
+        }
+
+        contact = InputSanitizer.shared.sanitizeText(contact)
+        isErrorMessage = false
         codeRequested = true
         message = "Verification code sent successfully"
     }
 }
-
 
 private struct CaptchaObject {
     let name: String

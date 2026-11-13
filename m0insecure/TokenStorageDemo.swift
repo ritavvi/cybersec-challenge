@@ -109,10 +109,17 @@ struct TokenStorageDemo: View {
             }
 
             if let message = statusMessage {
-                Text(message)
-                    .font(.caption)
-                    .foregroundColor(isSuccessMessage ? .green : .red)
-                    .padding(.horizontal)
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: isSuccessMessage ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundColor(isSuccessMessage ? .green : .red)
+                    Text(message)
+                        .font(.caption)
+                        .foregroundColor(isSuccessMessage ? .green : .red)
+                }
+                .padding(8)
+                .background(isSuccessMessage ? Color.green.opacity(0.1) : Color.red.opacity(0.1))
+                .cornerRadius(8)
+                .padding(.horizontal)
             }
 
             Spacer()
@@ -174,6 +181,7 @@ struct TokenStorageDemo: View {
         let tokenToSave = tokenInput
         Task {
             do {
+                try InputSanitizer.shared.validateSafety(input: tokenToSave, fieldName: "Token")
                 try KeychainHelper.shared.save(token: tokenToSave, for: keychainAccount)
                 await MainActor.run {
                     hasToken = true
@@ -184,7 +192,7 @@ struct TokenStorageDemo: View {
             } catch {
                 await MainActor.run {
                     isSuccessMessage = false
-                    statusMessage = "Save error: \(error.localizedDescription)"
+                    statusMessage = error.localizedDescription
                 }
             }
         }
@@ -195,6 +203,7 @@ struct TokenStorageDemo: View {
         let tokenToSave = tokenInput
         Task {
             do {
+                try InputSanitizer.shared.validateSafety(input: tokenToSave, fieldName: "Token")
                 // 1️⃣ Require Face ID authentication
                 try await KeychainHelper.shared.authenticateUser(reason: "Authenticate with Face ID to replace your token.")
 
@@ -213,7 +222,7 @@ struct TokenStorageDemo: View {
             } catch {
                 await MainActor.run {
                     isSuccessMessage = false
-                    statusMessage = "Replace error: \(error.localizedDescription)"
+                    statusMessage = error.localizedDescription
                 }
             }
         }
@@ -240,7 +249,7 @@ struct TokenStorageDemo: View {
             } catch {
                 await MainActor.run {
                     isSuccessMessage = false
-                    statusMessage = "Delete error: \(error.localizedDescription)"
+                    statusMessage = error.localizedDescription
                 }
             }
         }
